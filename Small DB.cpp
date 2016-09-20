@@ -254,41 +254,102 @@ public:
 
 CommandFactory * CommandFactory::fFactory = nullptr;
 
-
+template<typename K>
 class Undo
 {
-    queue<Command *> toRevert;
 public:
-    void add(string var, long);
+    struct UndoValue {
+        UndoValue(long value, bool valid) : fUndoValue(value), fValid(valid) {}
+        long fUndoValue;
+        bool fValid;
+    };
+    typedef unordered_map< K, UndoValue > Transaction;
+
+    virtual void begin() = 0;
+    virtual void set(const K & var, long value) = 0;
+    virtual void doUndo() = 0;
+    virtual void reset() = 0;
 };
 
-class Transaction
+template<typename K>
+class UndoImpl : public Undo<K>
 {
-    stack<vector<Command>> history;
+    Database * fDatabase;
+    stack<Transaction> fTransactions;
 public:
-    void add(queue<Command *> & c);
-};
+    UndoImpl(Database * db) : fDatabase(db) {}
 
+    virtual void begin() {
+        // create a new transaction.
+        Transaction t;
+        fTransactions.push(t);
+    }
+
+    virtual void set(const K & var, long value) {
+        // save the history data in the current transaction.
+        if (fTransactions.empty()) throw "no transaction. But try to revert?";
+
+        Transaction & t = fTransactions.top();
+        auto it = t.find(var);
+        if (it == t.end()) // first time to set the var during the current transaction. Then remember the value in DB before change.
+        {
+            long oldValueBeforeChange;
+            if (fDatabase->get(var, oldValueBeforeChange)) {
+                t.insert(make_pair(var, UndoValue(oldValueBeforeChange, true) ) ); // I made it too complicated. But really just calling insert is fine though. Because insert won't let the data come in if duplicate key.
+            }
+            else { // variable did not exist. Then put null. So later we can revert back to null.
+                t.insert(make_pair(var, UndoValue(-1, false)));
+            }
+        }
+    }
+
+    virtual void doUndo() {
+        // Based on the latest transaction, revert data in database and wipe the latest transaction.
+        Transaction & t = fTransactions.top();
+        for (auto it = t.begin(); it != t.end(); it++) {
+            if (it->second.fValid == false) {
+                Command * c = new UnSet(it->first);
+                c->run(fDatabase);
+                delete c;
+            }
+            else {
+                Command * c = new Set(it->first, it->second.fUndoValue);
+                c->run(fDatabase);
+                delete c;
+            }
+        }
+
+        fTransactions.pop();
+    }
+
+    virtual void reset() {
+        // wipe all existing transactions.
+        while (!fTransactions.empty()) {
+            fTransactions.pop();
+        }
+    }
+};
 
 class Database
 {
     unique_ptr< DataMap<string /*variable*//*values*/> > fValues;
     unique_ptr< DataMap<long/*values*//*frequency*/> > fFreqs;
 
+    unique_ptr< Undo<string> > fUndoManager;
+
 public:
-    Database() : fValues(new ValueMap<string>), fFreqs(new ValueMap<long>) {
+    Database() : fValues(new ValueMap<string>), fFreqs(new ValueMap<long>), fUndoManager(new UndoImpl<string>(this)) {
     }
     virtual ~Database() {}
 
     void run(Command * c);
-
-    // Return if it should continue.
     void interpretAndRun(const string & cmdStr);
 
-    friend class Set;
-    friend class UnSet;
-    friend class Get;
-    friend class NumEqualTo;
+    void set(string var, long value);
+    void unset(string var);
+    bool get(string var, long & outValue);
+    long freq(long value);
+    Undo<string> * getUndo();
 };
 
 int main() {
@@ -332,32 +393,56 @@ void Database::interpretAndRun(const string & cmdStr) {
     run(cmd.get());
 }
 
+void Database::set(string var, long value)
+{
+    // Save value. Change value and maintain num_equals data accordingly.
+    long oldValue;
+    if (fValues->get(var, oldValue)) {
+        fFreqs->decrement(oldValue);
+    }
+    fValues->set(var, value);
+    fFreqs->increment(value);
+}
+
+void Database::unset(string var) {
+    // delete value. maintain num_equals data accordingly.
+    long oldValue;
+    if (fValues->get(var, oldValue)) {
+        fFreqs->decrement(oldValue);
+        fValues->unset(var);
+    }
+}
+
+bool Database::get(string var, long & outValue)
+{
+    return fValues->get(var, outValue);
+}
+
+long Database::freq(long value)
+{
+    long freq = 0;
+    if (fFreqs->get(value, freq)) {
+        return freq;
+    }
+    return 0;
+}
+
+Undo<string> * Database::getUndo() { return fUndoManager.get(); }
+
 void Set::run(Database * db) {
     // set DataMap data and save the previous value in history.
-    long oldValue;
-    if (db->fValues->get(fVar, oldValue)) {
-        db->fFreqs->decrement(oldValue);
-    }
-    db->fValues->set(fVar, fValue);
-    db->fFreqs->increment(fValue);
+    db->set(fVar, fValue);
 }
 
 void UnSet::run(Database * db) {
     // unset DataMap data and save the previous value in history.
-    long oldValue;
-    if (db->fValues->get(fVar, oldValue)) {
-        db->fFreqs->decrement(oldValue);
-        db->fValues->unset(fVar);
-    }
-    else {
-        throw "cannot unset a var that does not exist.";
-    }
+    db->unset(fVar);
 }
 
 void Get::run(Database * db) {
     // get - print value.
-    long value = -1;
-    if (db->fValues->get(fVar, value)) {
+    long value;
+    if (db->get(fVar, value)) {
         cout << "> " << value << endl;
     }
     else
@@ -366,17 +451,14 @@ void Get::run(Database * db) {
 
 void NumEqualTo::run(Database * db) {
     // print freq.
-    //> 2
-    long freq = -1;
-    if (db->fFreqs->get(fValue, freq)) {
-        cout << "> " << freq << endl;
-    }
-    else
-        cout << "> 0" << endl;
+    long freq = db->freq(fValue);
+    cout << "> " << freq << endl;
 }
 
 void Begin::run(Database * db) {
     // create history.
+    Undo<string> * undo = db->getUndo();
+    undo->begin();
 }
 
 void NoOperation::run(Database * db) {
@@ -385,10 +467,14 @@ void NoOperation::run(Database * db) {
 void Rollback::run(Database * db) {
     // recover DataMap data from the latest history.
     // kill the history.
+    Undo<string> * undo = db->getUndo();
+    undo->doUndo();
 }
 
 void Commit::run(Database * db) {
     // wipe history and transaction.
+    Undo<string> * undo = db->getUndo();
+    undo->reset();
 }
 
 void End::run(Database * db) {
