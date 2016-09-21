@@ -25,7 +25,7 @@
 
 using namespace std;
 
-class Database;
+class Command;
 
 /*
 DataMap : abstract for map class
@@ -47,11 +47,11 @@ public:
 ValueMap : map class that has mapping for values. can be used to look up a variable.
 */
 template<typename K>
-class ValueMap : public DataMap<K>
+class ValueMap : public DataMap < K >
 {
     unordered_map<K /*var*/, long /*value*/> values;
 public:
-    // return: if the var existed or not.
+
     virtual void set(const K & var, long newValue) {
         long oldValue;
         bool exist = get(var, oldValue);
@@ -101,6 +101,45 @@ public:
     }
 };
 
+
+template<typename K>
+class Undo
+{
+public:
+    struct UndoValue {
+        UndoValue(long value, bool valid) : fUndoValue(value), fValid(valid) {}
+        long fUndoValue;
+        bool fValid;
+    };
+    typedef unordered_map< K, UndoValue > Transaction;
+
+    virtual void begin() = 0;
+    virtual void set(const K & var) = 0;
+    virtual void doUndo() = 0;
+    virtual void reset() = 0;
+};
+
+
+class Database
+{
+    unique_ptr< DataMap<string /*variable*//*values*/> > fValues;
+    unique_ptr< DataMap<long/*values*//*frequency*/> > fFreqs;
+
+    unique_ptr< Undo<string> > fUndoManager;
+
+public:
+    Database();
+    virtual ~Database() {}
+
+    void run(Command * c);
+    void interpretAndRun(const string & cmdStr);
+
+    void set(string var, long value);
+    void unset(string var);
+    bool get(string var, long & outValue);
+    long freq(long value);
+    Undo<string> * getUndo();
+};
 
 class Command  {
 public:
@@ -267,33 +306,16 @@ public:
 };
 
 template<typename K>
-class Undo
-{
-public:
-    struct UndoValue {
-        UndoValue(long value, bool valid) : fUndoValue(value), fValid(valid) {}
-        long fUndoValue;
-        bool fValid;
-    };
-    typedef unordered_map< K, UndoValue > Transaction;
-
-    virtual void begin() = 0;
-    virtual void set(const K & var) = 0;
-    virtual void doUndo() = 0;
-    virtual void reset() = 0;
-};
-
-template<typename K>
-class UndoImpl : public Undo<K>
+class UndoImpl : public Undo < K >
 {
     Database * fDatabase;
-    stack<Transaction> fTransactions;
+    stack<Undo<string>::Transaction> fTransactions;
 public:
     UndoImpl(Database * db) : fDatabase(db) {}
 
     virtual void begin() {
         // create a new transaction.
-        Transaction t;
+        Undo<string>::Transaction t;
         fTransactions.push(t);
     }
 
@@ -302,16 +324,16 @@ public:
         if (fTransactions.empty())
             return;
 
-        Transaction & t = fTransactions.top();
+        Undo<string>::Transaction & t = fTransactions.top();
         auto it = t.find(var);
         if (it == t.end()) // first time to set the var during the current transaction. Then remember the value in DB before change.
         {
             long oldValueBeforeChange;
             if (fDatabase->get(var, oldValueBeforeChange)) {
-                t.insert(make_pair(var, UndoValue(oldValueBeforeChange, true))); // I made it too complicated. But really just calling insert is fine though. Because insert won't let the data come in if duplicate key.
+                t.insert(make_pair(var, Undo<string>::UndoValue(oldValueBeforeChange, true))); // I made it too complicated. But really just calling insert is fine though. Because insert won't let the data come in if duplicate key.
             }
             else { // variable did not exist. Then put null. So later we can revert back to null.
-                t.insert(make_pair(var, UndoValue(-1, false)));
+                t.insert(make_pair(var, Undo<string>::UndoValue(-1, false)));
             }
         }
     }
@@ -321,7 +343,7 @@ public:
             throw NoTransactionException();
 
         // Based on the latest transaction, revert data in database and wipe the latest transaction.
-        Transaction & t = fTransactions.top();
+        Undo<string>::Transaction & t = fTransactions.top();
         for (auto it = t.begin(); it != t.end(); it++) {
             if (it->second.fValid == false) {
                 Command * c = new UnSet(it->first);
@@ -347,49 +369,16 @@ public:
             fTransactions.pop();
         }
     }
-};
 
-class Database
-{
-    unique_ptr< DataMap<string /*variable*//*values*/> > fValues;
-    unique_ptr< DataMap<long/*values*//*frequency*/> > fFreqs;
-
-    unique_ptr< Undo<string> > fUndoManager;
-
-public:
-    Database() : fValues(new ValueMap<string>), fFreqs(new ValueMap<long>), fUndoManager(new UndoImpl<string>(this)) {
-    }
-    virtual ~Database() {}
-
-    void run(Command * c);
-    void interpretAndRun(const string & cmdStr);
-
-    void set(string var, long value);
-    void unset(string var);
-    bool get(string var, long & outValue);
-    long freq(long value);
-    Undo<string> * getUndo();
 };
 
 int main() {
     /* Enter your code here. Read input from STDIN. Print output to STDOUT */
     Database db;
-
     string line;
 
-    string filename;
-    std::cin >> filename;
-
-    fstream in(filename);
-    if (!in.is_open()) {
-        system("pwd");
-        system("cd");
-        return -1;
-    }
-
-
-    while (!in.eof()) {
-        getline(in, line);
+    while (!cin.eof()) {
+        getline(cin, line);
         cout << line << endl;
 
         db.interpretAndRun(line);
@@ -399,7 +388,8 @@ int main() {
     return 0;
 }
 
-
+Database::Database() : fValues(new ValueMap<string>), fFreqs(new ValueMap<long>), fUndoManager(new UndoImpl<string>(this)) {
+}
 
 void Database::run(Command * c) {
     c->run(this);
