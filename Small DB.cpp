@@ -1,4 +1,5 @@
 #include <map>
+#include <exception>
 #include <memory>
 #include <set>
 #include <list>
@@ -27,7 +28,7 @@ using namespace std;
 class Database;
 
 /*
- DataMap : abstract for map class
+DataMap : abstract for map class
 */
 template<typename K>
 class DataMap
@@ -43,7 +44,7 @@ public:
 };
 
 /*
- ValueMap : map class that has mapping for values. can be used to look up a variable.
+ValueMap : map class that has mapping for values. can be used to look up a variable.
 */
 template<typename K>
 class ValueMap : public DataMap<K>
@@ -51,12 +52,13 @@ class ValueMap : public DataMap<K>
     unordered_map<K /*var*/, long /*value*/> values;
 public:
     // return: if the var existed or not.
-    virtual void set(const K & var, long value) {
-        bool exist = get(var, value);
+    virtual void set(const K & var, long newValue) {
+        long oldValue;
+        bool exist = get(var, oldValue);
         if (exist) {
             values.erase(var);
         }
-        values.insert(make_pair(var, value));
+        values.insert(make_pair(var, newValue));
     }
 
     virtual void unset(const K & var) {
@@ -94,7 +96,7 @@ public:
             }
         }
         else {
-            throw "Cannot decrement what does not exist.";
+            //throw "Cannot decrement what does not exist.";
         }
     }
 };
@@ -197,6 +199,8 @@ public:
 class CommandFactory {
     static CommandFactory * fFactory;
 public:
+
+    // Singleton. - Memory leakage seems inevitable. Is there a better way?
     static CommandFactory * getInstnace() {
         if (fFactory == nullptr) {
             fFactory = new CommandFactory();
@@ -254,6 +258,14 @@ public:
 
 CommandFactory * CommandFactory::fFactory = nullptr;
 
+class NoTransactionException : public std::runtime_error {
+public:
+    NoTransactionException() : runtime_error("no more transaction.") {}
+    virtual const char* what() const throw() {
+        return runtime_error::what();
+    }
+};
+
 template<typename K>
 class Undo
 {
@@ -266,7 +278,7 @@ public:
     typedef unordered_map< K, UndoValue > Transaction;
 
     virtual void begin() = 0;
-    virtual void set(const K & var, long value) = 0;
+    virtual void set(const K & var) = 0;
     virtual void doUndo() = 0;
     virtual void reset() = 0;
 };
@@ -285,9 +297,10 @@ public:
         fTransactions.push(t);
     }
 
-    virtual void set(const K & var, long value) {
+    virtual void set(const K & var) {
         // save the history data in the current transaction.
-        if (fTransactions.empty()) throw "no transaction. But try to revert?";
+        if (fTransactions.empty())
+            return;
 
         Transaction & t = fTransactions.top();
         auto it = t.find(var);
@@ -295,7 +308,7 @@ public:
         {
             long oldValueBeforeChange;
             if (fDatabase->get(var, oldValueBeforeChange)) {
-                t.insert(make_pair(var, UndoValue(oldValueBeforeChange, true) ) ); // I made it too complicated. But really just calling insert is fine though. Because insert won't let the data come in if duplicate key.
+                t.insert(make_pair(var, UndoValue(oldValueBeforeChange, true))); // I made it too complicated. But really just calling insert is fine though. Because insert won't let the data come in if duplicate key.
             }
             else { // variable did not exist. Then put null. So later we can revert back to null.
                 t.insert(make_pair(var, UndoValue(-1, false)));
@@ -304,6 +317,9 @@ public:
     }
 
     virtual void doUndo() {
+        if (fTransactions.empty())
+            throw NoTransactionException();
+
         // Based on the latest transaction, revert data in database and wipe the latest transaction.
         Transaction & t = fTransactions.top();
         for (auto it = t.begin(); it != t.end(); it++) {
@@ -324,6 +340,9 @@ public:
 
     virtual void reset() {
         // wipe all existing transactions.
+        if (fTransactions.empty())
+            throw NoTransactionException();
+
         while (!fTransactions.empty()) {
             fTransactions.pop();
         }
@@ -368,7 +387,7 @@ int main() {
         return -1;
     }
 
-    
+
     while (!in.eof()) {
         getline(in, line);
         cout << line << endl;
@@ -427,15 +446,21 @@ long Database::freq(long value)
     return 0;
 }
 
-Undo<string> * Database::getUndo() { return fUndoManager.get(); }
+Undo<string> * Database::getUndo() {
+    return fUndoManager.get();
+}
 
 void Set::run(Database * db) {
     // set DataMap data and save the previous value in history.
+    Undo<string> * undo = db->getUndo();
+    undo->set(fVar);
     db->set(fVar, fValue);
 }
 
 void UnSet::run(Database * db) {
     // unset DataMap data and save the previous value in history.
+    Undo<string> * undo = db->getUndo();
+    undo->set(fVar);
     db->unset(fVar);
 }
 
@@ -467,14 +492,24 @@ void NoOperation::run(Database * db) {
 void Rollback::run(Database * db) {
     // recover DataMap data from the latest history.
     // kill the history.
-    Undo<string> * undo = db->getUndo();
-    undo->doUndo();
+    try {
+        Undo<string> * undo = db->getUndo();
+        undo->doUndo();
+    }
+    catch (const NoTransactionException &) {
+        cout << "> NO TRANSACTION" << endl;
+    }
 }
 
 void Commit::run(Database * db) {
     // wipe history and transaction.
-    Undo<string> * undo = db->getUndo();
-    undo->reset();
+    try {
+        Undo<string> * undo = db->getUndo();
+        undo->reset();
+    }
+    catch (const NoTransactionException &) {
+        cout << "> NO TRANSACTION" << endl;
+    }
 }
 
 void End::run(Database * db) {
