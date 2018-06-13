@@ -10,10 +10,10 @@ vector<bool> & visited, const vector<vector<int>> & jump)
     }
     
     visited[curNode] = true;
-    cout << "visiting " << curNode << endl;
+    //cout << "visiting " << curNode << endl;
     int count = 0;
     for(int i = 1 ; i < 10 ; i++) {
-        if(visited[i] == false && (jump[curNode][i] == 0 && visited[jump[curNode][i]] == true)) {
+        if(visited[i] == false && (jump[curNode][i] == 0 || visited[jump[curNode][i]] == true)) {
             count += DFSWaysOfConnectionHelper(depth, curDepth + 1, i, visited, jump);
         }
     }
@@ -24,8 +24,7 @@ vector<bool> & visited, const vector<vector<int>> & jump)
 
 int DFSWaysOfConnection(int depth, int cur, const vector<vector<int>> & jump)
 {
-    vector<bool> visited(9, false);
-    
+    vector<bool> visited(10, false);
     return DFSWaysOfConnectionHelper(depth, 1, cur, visited, jump);
 }
 
@@ -43,26 +42,22 @@ int waysOfConnection(int min, int max)
     jump[1][7] = jump[7][1] = 4;
     jump[2][8] = jump[8][2] = 5;
     jump[3][9] = jump[9][3] = 6;
-    jump[1][9] = jump[9][1] = 5;
-    jump[3][7] = jump[7][3] = 5;
+    jump[1][9] = jump[9][1] = jump[3][7] = jump[7][3] = 5;
 
     int cases = 0;
     for(int i = min ; i <= max ; i++) {
-        for(int j = 1 ; j < 10 ; j++) {
-            cases += DFSWaysOfConnection(i, j, jump);
-        }
+        //cout << i << " jump turn" << endl;
+        cases += DFSWaysOfConnection(i, 1, jump) * 4;
+        cases += DFSWaysOfConnection(i, 2, jump) * 4;
+        cases += DFSWaysOfConnection(i, 5, jump);
     }
     
     return cases;
-    // triangle case * 4, rectangle case * 4, star case * 1.
-    //int nCases = DFSWaysOfConnection(min, max, visited, Point(0, 0)) * 4;
-    //nCases += DFSWaysOfConnection(min, max, visited, Point(1, 0)) * 4;
-    //nCases += DFSWaysOfConnection(min, max, visited, Point(1, 1));
 }
 
 int main() {
-	int minConnect = 4;
-    int maxConnect = 6;
+    int minConnect = 5;
+    int maxConnect = 7;
  
     cout << waysOfConnection(minConnect, maxConnect);
  
